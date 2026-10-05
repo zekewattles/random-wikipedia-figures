@@ -29,6 +29,7 @@
     color-scheme: dark;
   }
 }
+@media (max-width: 600px) { :root { --size: 0.8125rem; } }   /* 13px on phones */
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
@@ -63,6 +64,7 @@ body {
 .thumb figcaption a { color: var(--link); text-decoration: none; }
 .thumb figcaption a:hover { text-decoration: underline; }
 .thumb sup { font-size: .8em; line-height: 0; }
+#grid.still .thumb { animation: none; opacity: 1; }   /* no fade when re-flowing on resize */
 @keyframes in { from { opacity: 0; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .thumb { animation: none; opacity: 1; } #controls { transition: none; } }
 
@@ -78,7 +80,7 @@ body {
   font: 13px/1 var(--sans); color: var(--ink);
   background: var(--thumb); border: 1px solid var(--muted); border-radius: 2px;
   padding: 8px 10px 8px 14px; box-shadow: 0 2px 10px rgba(0,0,0,.25);
-  transition: opacity .4s;
+  transition: opacity .2s;
 }
 #controls.idle { opacity: 0; pointer-events: none; }
 #controls:focus-within { opacity: 1; pointer-events: auto; }
@@ -273,6 +275,7 @@ body {
   async function build(fresh) {
     const id = ++run;
     const { rows, need } = plan();
+    grid.classList.toggle('still', !fresh);
     if (fresh) {
       btn.disabled = true;
       grid.replaceChildren(); shown = [];
@@ -330,7 +333,7 @@ body {
   function wake() {
     controls.classList.remove('idle');
     clearTimeout(idleT);
-    idleT = setTimeout(() => { if (!controls.matches(':hover')) controls.classList.add('idle'); }, 3500);
+    idleT = setTimeout(() => { if (!controls.matches(':hover')) controls.classList.add('idle'); }, 1500);
   }
   ['pointermove', 'pointerdown', 'keydown'].forEach(ev => addEventListener(ev, wake, { passive: true }));
   wake();
