@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Random Wikipedia Figures</title>
+<style>
+/* Layout: a column of flex rows that exactly fills the viewport; each row is a
+   flex line of Wikipedia-style thumbs whose widths follow their image's aspect ratio. */
+:root {
+  --ground: #eceae4;        /* paper behind the thumbs */
+  --thumb: #f8f9fa;         /* Wikipedia thumb fill */
+  --rule: #c8ccd1;          /* Wikipedia thumb border */
+  --ink: #202122;
+  --muted: #54595d;
+  --link: #3366cc;
+  --plate: #ffffff;         /* backing for diagrams and transparent images */
+  --size: 0.875rem;         /* caption type size (14px); the grid scales with it */
+  --gap: calc(var(--size) * .5);
+  --pad: calc(var(--size) * .8);
+  --caption: var(--size);
+  --sans: Arial, "Helvetica Neue", Helvetica, "Liberation Sans", sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0c0d0f; --thumb: #1b1d20; --rule: #43474c;
+    --ink: #eaecf0; --muted: #a2a9b1; --link: #88a3e8; --plate: #ffffff;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--ground); color: var(--ink);
+  font: var(--caption)/1.35 var(--sans);
+  overflow: hidden;
+}
+#grid {
+  position: fixed; inset: 0;
+  padding: calc(var(--pad) + env(safe-area-inset-top, 0px)) var(--pad)
+           calc(var(--pad) + env(safe-area-inset-bottom, 0px));
+  display: flex; flex-direction: column; gap: var(--gap);
+}
+.row { display: flex; gap: var(--gap); min-height: 0; flex-basis: 0; }
+.thumb {
+  display: flex; flex-direction: column; min-width: 0; flex-basis: 0; flex-shrink: 1;
+  margin: 0; padding: 3px;
+  background: var(--thumb); border: 1px solid var(--rule);
+  opacity: 0; animation: in .35s ease-out forwards;
+}
+.thumb a.img {
+  flex: 1 1 0; min-height: 0; display: block;
+  background: var(--plate); border: 1px solid var(--rule);
+}
+.thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.thumb.diagram img { object-fit: contain; }
+.thumb figcaption {
+  flex: none; padding: 3px 2px 1px; color: var(--ink);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4;
+  overflow: hidden; overflow-wrap: anywhere;
+}
+.thumb figcaption a { color: var(--link); text-decoration: none; }
+.thumb figcaption a:hover { text-decoration: underline; }
+.thumb sup { font-size: .8em; line-height: 0; }
+@keyframes in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .thumb { animation: none; opacity: 1; } #controls { transition: none; } }
+
+#status {
+  position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+  padding: 24px; text-align: center; color: var(--muted); font-size: 14px;
+  font-variant-numeric: tabular-nums; pointer-events: none;
+}
+#controls {
+  position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  max-width: calc(100% - 32px);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+  font: 13px/1 var(--sans); color: var(--ink);
+  background: var(--thumb); border: 1px solid var(--muted); border-radius: 2px;
+  padding: 8px 10px 8px 14px; box-shadow: 0 2px 10px rgba(0,0,0,.25);
+  transition: opacity .4s;
+}
+#controls.idle { opacity: 0; pointer-events: none; }
+#controls:focus-within { opacity: 1; pointer-events: auto; }
+#controls label { display: flex; align-items: center; gap: 8px; white-space: nowrap; cursor: pointer; }
+#hourly { accent-color: var(--link); margin: 0; }
+#shuffle {
+  font: 700 13px/1 var(--sans); color: var(--ink);
+  background: var(--plate); color: #202122; border: 1px solid var(--muted); border-radius: 2px;
+  padding: 8px 14px; cursor: pointer;
+}
+#shuffle:hover { border-color: var(--link); }
+#shuffle:focus-visible, #controls input:focus-visible, a:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+#shuffle:disabled { opacity: .6; cursor: progress; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main id="grid" aria-live="polite"></main>
+<div id="status">Finding captioned images…</div>
+<div id="controls">
+  <label for="hourly"><input id="hourly" type="checkbox"> Refresh every hour</label>
+  <button id="shuffle" type="button" title="Shuffle (space bar)">Shuffle</button>
+</div>
+
+<script>
+(() => {
+  const API = 'https://en.wikipedia.org/w/api.php';
+  const WIKI = 'https://en.wikipedia.org';
+  const grid = document.getElementById('grid');
+  const statusEl = document.getElementById('status');
+  const btn = document.getElementById('shuffle');
+  const controls = document.getElementById('controls');
+  const hourly = document.getElementById('hourly');
+  const BASE = 11.5;     // the type size the row heights below were tuned at
+  const store = {
+    get(k) { try { return localStorage.getItem('rc-' + k); } catch (e) { return null; } },
+    set(k, v) { try { localStorage.setItem('rc-' + k, v); } catch (e) {} }
+  };
+
+  let pool = [];        // captioned images fetched but not yet shown
+  let shown = [];       // what is on screen now
+  let run = 0;          // cancels stale fetch loops
+  const seen = new Set();
+
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const shuffleArr = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+
+  async function api(params) {
+    const url = API + '?' + new URLSearchParams({ format: 'json', formatversion: '2', origin: '*', ...params });
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }
+
+  // A batch of random article titles, skipping the shortest stubs (they rarely have a thumb).
+  async function randomTitles() {
+    const d = await api({ action: 'query', generator: 'random', grnnamespace: '0',
+      grnfilterredir: 'nonredirects', grnlimit: '50', prop: 'info' });
+    return (d.query?.pages || []).filter(p => p.length >= 3500).map(p => p.title);
+  }
+
+  const abs = u => !u ? '' : u.startsWith('//') ? 'https:' + u : u.startsWith('/') ? WIKI + u : u;
+
+  // Rebuild a caption from a small whitelist so nothing from the fetched HTML runs here.
+  const KEEP = new Set(['I', 'B', 'EM', 'STRONG', 'SUP', 'SUB']);
+  const DROP = new Set(['STYLE', 'SCRIPT', 'LINK', 'IMG', 'MATH', 'TABLE', 'AUDIO', 'VIDEO']);
+  function cleanInto(src, dest) {
+    for (const n of src.childNodes) {
+      if (n.nodeType === 3) { dest.append(n.nodeValue); continue; }
+      if (n.nodeType !== 1 || DROP.has(n.tagName)) continue;
+      let el = null;
+      if (n.tagName === 'A') {
+        const href = abs(n.getAttribute('href'));
+        if (/^https?:\/\//.test(href)) { el = document.createElement('a'); el.href = href; el.target = '_blank'; el.rel = 'noopener'; }
+      } else if (KEEP.has(n.tagName)) el = document.createElement(n.tagName);
+      if (el) { cleanInto(n, el); dest.append(el); } else cleanInto(n, dest);
+    }
+  }
+
+  // Every thumbnail in an article that has a real caption. Uncaptioned images are never returned.
+  async function captioned(title) {
+    const d = await api({ action: 'parse', page: title, prop: 'text', redirects: '1',
+      disableeditsection: '1', disabletoc: '1', disablelimitreport: '1' });
+    if (!d.parse?.text) return [];
+    const doc = new DOMParser().parseFromString(d.parse.text, 'text/html');
+    const out = [];
+    for (const fig of doc.querySelectorAll('figure')) {
+      if (fig.closest('table, .infobox, .navbox, .metadata, .gallery')) continue;
+      const cap = fig.querySelector('figcaption');
+      const img = fig.querySelector('img');
+      if (!cap || !img) continue;
+      if (cap.textContent.replace(/\s+/g, ' ').trim().length < 4) continue;
+      const w = +img.getAttribute('width'), h = +img.getAttribute('height');
+      if (!(w >= 120 && h >= 80)) continue;
+      const src = abs(img.getAttribute('src'));
+      if (!src || seen.has(src)) continue;
+      const srcset = (img.getAttribute('srcset') || '').split(',').map(s => s.trim()).filter(Boolean)
+        .map(s => { const [u, x] = s.split(/\s+/); return abs(u) + (x ? ' ' + x : ''); }).join(', ');
+      out.push({ src, srcset, aspect: w / h, cap, title: d.parse.title,
+        diagram: /\.(svg|png|gif)(\.png)?$/i.test(src.split('?')[0]) });
+    }
+    return out;
+  }
+
+  // Keep pulling random articles until the pool holds `need` captioned images.
+  async function fill(need, id) {
+    let failures = 0, batches = 0;
+    while (pool.length < need && id === run && batches < 40) {
+      batches++;
+      let titles;
+      try { titles = await randomTitles(); }
+      catch (e) { if (++failures >= 3) throw e; continue; }
+      let i = 0;
+      const worker = async () => {
+        while (i < titles.length && pool.length < need && id === run) {
+          const t = titles[i++];
+          try {
+            const found = shuffleArr(await captioned(t)).slice(0, 1); // one per article keeps the mix wide
+            for (const f of found) { seen.add(f.src); pool.push(f); }
+            if (id === run) statusEl.textContent = `Finding captioned images… ${Math.min(pool.length, need)} / ${need}`;
+          } catch (e) { /* skip this article */ }
+        }
+      };
+      await Promise.all(Array.from({ length: 6 }, worker));
+    }
+  }
+
+  // Random row heights and random tiles per row, sized so the grid fills the viewport.
+  function plan() {
+    const cs = getComputedStyle(grid);
+    const W = grid.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    const H = grid.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+    const k = parseFloat(getComputedStyle(document.body).fontSize) / BASE;   // rows scale with the type size
+    const gap = parseFloat(cs.rowGap) || 0;
+    const R = Math.max(1, Math.round(H / (rand(200, 250) * k)));
+    const weights = Array.from({ length: R }, () => rand(0.8, 1.3));
+    const total = weights.reduce((a, b) => a + b, 0);
+    const rows = weights.map(wt => {
+      const rowH = (H - gap * (R - 1)) * wt / total;
+      const imgH = Math.max(60, rowH - 70 * k);          // leave room for the caption
+      return { weight: wt, target: Math.max(1.2, W / imgH) };
+    });
+    const need = Math.ceil(rows.reduce((a, r) => a + r.target, 0) / 1.1) + R;
+    return { rows, need };
+  }
+
+  function tile(item, delay) {
+    const fig = document.createElement('figure');
+    fig.className = 'thumb' + (item.diagram ? ' diagram' : '');
+    const a = Math.min(2.4, Math.max(0.55, item.aspect));
+    fig.style.flexGrow = a.toFixed(3);
+    fig.style.animationDelay = delay + 'ms';
+    const link = document.createElement('a');
+    link.className = 'img'; link.target = '_blank'; link.rel = 'noopener';
+    link.href = WIKI + '/wiki/' + encodeURIComponent(item.title.replace(/ /g, '_'));
+    link.title = item.title;
+    const img = document.createElement('img');
+    img.alt = ''; img.decoding = 'async'; img.src = item.src;
+    if (item.srcset) img.srcset = item.srcset;
+    img.onerror = () => fig.remove();
+    link.append(img);
+    const cap = document.createElement('figcaption');
+    cleanInto(item.cap, cap);
+    cap.title = cap.textContent.trim();
+    fig.append(link, cap);
+    return { fig, a };
+  }
+
+  function render(rows, items) {
+    grid.replaceChildren();
+    const queue = items.slice();
+    let n = 0;
+    shown = [];
+    for (const r of rows) {
+      if (!queue.length) break;
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.style.flexGrow = r.weight.toFixed(3);
+      let sum = 0;
+      while (queue.length && sum < r.target * 0.88) {
+        const item = queue.shift();
+        const t = tile(item, n++ * 18);
+        sum += t.a; row.append(t.fig); shown.push(item);
+      }
+      grid.append(row);
+    }
+    return queue; // leftovers go back to the pool
+  }
+
+  // fresh = true: fetch a new set. fresh = false: re-flow what is on screen for a new
+  // viewport or size, topping up from Wikipedia only if the grid now needs more images.
+  async function build(fresh) {
+    const id = ++run;
+    const { rows, need } = plan();
+    if (fresh) {
+      btn.disabled = true;
+      grid.replaceChildren(); shown = [];
+      statusEl.hidden = false;
+      statusEl.textContent = 'Finding captioned images…';
+    } else {
+      pool = shown.concat(pool);
+      shown = [];
+      if (pool.length) pool = render(rows, pool);        // re-flow right away, top up after
+      if (shown.length + pool.length >= need) return;
+      pool = shown.concat(pool); shown = [];
+    }
+    try {
+      await fill(need, id);
+      if (id !== run) return;
+      if (!pool.length) throw new Error('empty');
+      statusEl.hidden = true;
+      pool = render(rows, fresh ? shuffleArr(pool) : pool);
+    } catch (e) {
+      if (id !== run) return;
+      if (!grid.children.length) {
+        statusEl.hidden = false;
+        statusEl.textContent = "Couldn't reach Wikipedia. Check your connection, then press Shuffle.";
+      }
+    } finally {
+      if (id === run) btn.disabled = false;
+    }
+  }
+  const shuffle = () => build(true);
+
+  let rt;
+  const reflow = () => { clearTimeout(rt); rt = setTimeout(() => { if (!btn.disabled) build(false); }, 200); };
+  addEventListener('resize', reflow);
+
+  // Hourly refresh: fires at the top of each clock hour while the box is ticked.
+  let hourTimer, nextHour = 0;
+  function scheduleHourly() {
+    clearTimeout(hourTimer); nextHour = 0;
+    if (!hourly.checked) return;
+    const t = new Date(); t.setHours(t.getHours() + 1, 0, 0, 0);
+    nextHour = t.getTime();
+    hourTimer = setTimeout(hourTick, nextHour - Date.now() + 50);
+  }
+  function hourTick() { scheduleHourly(); build(true); }
+  hourly.addEventListener('change', () => { store.set('hourly', hourly.checked ? '1' : '0'); scheduleHourly(); });
+  // If the computer slept through an hour mark, catch up when the page is seen again.
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && nextHour && Date.now() >= nextHour) hourTick();
+  });
+  hourly.checked = store.get('hourly') !== '0';   // on unless the viewer has turned it off
+  scheduleHourly();
+
+  // The controls fade out when the pointer is still, so the grid can sit as a display.
+  let idleT;
+  function wake() {
+    controls.classList.remove('idle');
+    clearTimeout(idleT);
+    idleT = setTimeout(() => { if (!controls.matches(':hover')) controls.classList.add('idle'); }, 3500);
+  }
+  ['pointermove', 'pointerdown', 'keydown'].forEach(ev => addEventListener(ev, wake, { passive: true }));
+  wake();
+
+  btn.addEventListener('click', shuffle);
+  addEventListener('keydown', e => {
+    if (e.code === 'Space' && e.target === document.body && !btn.disabled) { e.preventDefault(); shuffle(); }
+  });
+  shuffle();
+})();
+</script>
+</body>
+</html>
